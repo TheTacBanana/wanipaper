@@ -1,0 +1,90 @@
+use smithay_client_toolkit::{
+    compositor::CompositorState,
+    output::OutputState,
+    registry::RegistryState,
+    seat::SeatState,
+    shell::{
+        wlr_layer::{KeyboardInteractivity, Layer, LayerShell},
+        WaylandSurface,
+    },
+    shm::{slot::SlotPool, Shm},
+};
+use state::State;
+use wayland_client::{globals::registry_queue_init, Connection};
+
+pub mod state;
+
+fn main() {
+    env_logger::init();
+
+    // All Wayland apps start by connecting the compositor (server).
+    let conn = Connection::connect_to_env().unwrap();
+
+    // Enumerate the list of globals to get the protocols the server implements.
+    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let qh = event_queue.handle();
+
+    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
+    let layer_shell = LayerShell::bind(&globals, &qh).expect("layer shell is not available");
+    let shm = Shm::bind(&globals, &qh).expect("wl_shm is not available");
+
+    let registry_state = RegistryState::new(&globals);
+    let seat_state = SeatState::new(&globals, &qh);
+    let output_state = OutputState::new(&globals, &qh);
+
+    let surface = compositor.create_surface(&qh);
+    let layer = layer_shell.create_layer_surface(
+        &qh,
+        surface,
+        Layer::Bottom,
+        Some("wanipaper_layer"),
+        None,
+    );
+    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+    layer.set_size(256, 256);
+    layer.commit();
+
+    // We don't know how large the window will be yet, so lets assume the minimum size we suggested for the
+    // initial memory allocation.
+    let pool = SlotPool::new(256 * 256 * 4, &shm).expect("Failed to create pool");
+
+    let mut state = State {
+        // Seats and outputs may be hotplugged at runtime, therefore we need to setup a registry state to
+        // listen for seats and outputs.
+        registry_state,
+        seat_state,
+        output_state,
+        shm,
+
+        exit: false,
+        first_configure: true,
+        pool,
+        width: 256,
+        height: 256,
+        shift: None,
+        layer,
+        pointer: None,
+    };
+
+    event_queue.roundtrip(&mut state).unwrap();
+
+    let output = state
+        .output_state
+        .outputs()
+        .filter_map(|o| state.output_state.info(&o))
+        .next()
+        .expect("No surfaces found");
+
+    if let Some((width, height)) = output.logical_size.as_ref() {
+        state.layer.set_size(*width as u32, *height as u32);
+    }
+
+    loop {
+        event_queue.blocking_dispatch(&mut state).unwrap();
+
+        if state.exit {
+            println!("exiting example");
+            break;
+        }
+    }
+}
