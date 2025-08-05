@@ -1,4 +1,4 @@
-use std::num::NonZeroU32;
+use std::{collections::HashMap, num::NonZeroU32};
 
 use smithay_client_toolkit::{
     compositor::CompositorHandler,
@@ -22,6 +22,8 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 
+use crate::display::Display;
+
 pub struct State {
     pub registry_state: RegistryState,
     pub seat_state: SeatState,
@@ -30,128 +32,12 @@ pub struct State {
 
     pub exit: bool,
     pub first_configure: bool,
-    pub pool: SlotPool,
-    pub width: u32,
-    pub height: u32,
-    pub shift: Option<u32>,
-    pub layer: LayerSurface,
     pub pointer: Option<wl_pointer::WlPointer>,
+
+    pub displays: HashMap<u32, Display>,
 }
 
-impl State {
-    pub fn draw(&mut self, qh: &QueueHandle<Self>) {
-        let width = self.width;
-        let height = self.height;
-        let stride = self.width as i32 * 4;
-
-        let (buffer, canvas) = self
-            .pool
-            .create_buffer(
-                width as i32,
-                height as i32,
-                stride,
-                wl_shm::Format::Argb8888,
-            )
-            .expect("create buffer");
-
-        // Draw to the window:
-        {
-            let shift = self.shift.unwrap_or(0);
-            canvas
-                .chunks_exact_mut(4)
-                .enumerate()
-                .for_each(|(index, chunk)| {
-                    let x = ((index + shift as usize) % width as usize) as u32;
-                    let y = (index / width as usize) as u32;
-
-                    let a = 0xFF;
-                    let r = u32::min(((width - x) * 0xFF) / width, ((height - y) * 0xFF) / height);
-                    let g = u32::min((x * 0xFF) / width, ((height - y) * 0xFF) / height);
-                    let b = u32::min(((width - x) * 0xFF) / width, (y * 0xFF) / height);
-                    let color = (a << 24) + (r << 16) + (g << 8) + b;
-
-                    let array: &mut [u8; 4] = chunk.try_into().unwrap();
-                    *array = color.to_le_bytes();
-                });
-
-            if let Some(shift) = &mut self.shift {
-                *shift = (*shift + 1) % width;
-            }
-        }
-
-        // Damage the entire window
-        self.layer
-            .wl_surface()
-            .damage_buffer(0, 0, width as i32, height as i32);
-
-        // Request our next frame
-        self.layer
-            .wl_surface()
-            .frame(qh, self.layer.wl_surface().clone());
-
-        // Attach and commit to present.
-        buffer
-            .attach_to(self.layer.wl_surface())
-            .expect("buffer attach");
-        self.layer.commit();
-
-        // TODO save and reuse buffer when the window size is unchanged.  This is especially
-        // useful if you do damage tracking, since you don't need to redraw the undamaged parts
-        // of the canvas.
-    }
-}
-
-impl CompositorHandler for State {
-    fn scale_factor_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
-    ) {
-        // Not needed for this example.
-    }
-
-    fn transform_changed(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_transform: wl_output::Transform,
-    ) {
-        // Not needed for this example.
-    }
-
-    fn frame(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _time: u32,
-    ) {
-        self.draw(qh);
-    }
-
-    fn surface_enter(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-        // Not needed for this example.
-    }
-
-    fn surface_leave(
-        &mut self,
-        _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _output: &wl_output::WlOutput,
-    ) {
-        // Not needed for this example.
-    }
-}
+impl State {}
 
 impl OutputHandler for State {
     fn output_state(&mut self) -> &mut OutputState {
@@ -180,30 +66,6 @@ impl OutputHandler for State {
         _qh: &QueueHandle<Self>,
         _output: wl_output::WlOutput,
     ) {
-    }
-}
-
-impl LayerShellHandler for State {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _conn: &Connection,
-        qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
-        _serial: u32,
-    ) {
-        self.width = NonZeroU32::new(configure.new_size.0).map_or(256, NonZeroU32::get);
-        self.height = NonZeroU32::new(configure.new_size.1).map_or(256, NonZeroU32::get);
-
-        // Initiate the first draw.
-        if self.first_configure {
-            self.first_configure = false;
-            self.draw(qh);
-        }
     }
 }
 
@@ -294,6 +156,35 @@ delegate_shm!(State);
 delegate_seat!(State);
 delegate_pointer!(State);
 
-delegate_layer!(State);
-
 delegate_registry!(State);
+
+pub fn print_output(info: &OutputInfo) {
+    println!("{}", info.model);
+
+    if let Some(name) = info.name.as_ref() {
+        println!("\tname: {name}");
+    }
+
+    if let Some(description) = info.description.as_ref() {
+        println!("\tdescription: {description}");
+    }
+
+    println!("\tmake: {}", info.make);
+    println!("\tx: {}, y: {}", info.location.0, info.location.1);
+    println!("\tsubpixel: {:?}", info.subpixel);
+    println!(
+        "\tphysical_size: {}×{}mm",
+        info.physical_size.0, info.physical_size.1
+    );
+    if let Some((x, y)) = info.logical_position.as_ref() {
+        println!("\tlogical x: {x}, y: {y}");
+    }
+    if let Some((width, height)) = info.logical_size.as_ref() {
+        println!("\tlogical width: {width}, height: {height}");
+    }
+    println!("\tmodes:");
+
+    for mode in &info.modes {
+        println!("\t\t{mode}");
+    }
+}

@@ -1,10 +1,12 @@
+use std::collections::HashMap;
+
 use smithay_client_toolkit::{
     compositor::CompositorState,
     output::OutputState,
     registry::RegistryState,
     seat::SeatState,
     shell::{
-        wlr_layer::{KeyboardInteractivity, Layer, LayerShell},
+        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell},
         WaylandSurface,
     },
     shm::{slot::SlotPool, Shm},
@@ -12,6 +14,7 @@ use smithay_client_toolkit::{
 use state::State;
 use wayland_client::{globals::registry_queue_init, Connection};
 
+pub mod display;
 pub mod state;
 
 fn main() {
@@ -32,58 +35,58 @@ fn main() {
     let seat_state = SeatState::new(&globals, &qh);
     let output_state = OutputState::new(&globals, &qh);
 
-    let surface = compositor.create_surface(&qh);
-    let layer = layer_shell.create_layer_surface(
-        &qh,
-        surface,
-        Layer::Bottom,
-        Some("wanipaper_layer"),
-        None,
-    );
-    layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-    layer.set_size(256, 256);
-    layer.commit();
-
-    // We don't know how large the window will be yet, so lets assume the minimum size we suggested for the
-    // initial memory allocation.
-    let pool = SlotPool::new(256 * 256 * 4, &shm).expect("Failed to create pool");
-
     let mut state = State {
-        // Seats and outputs may be hotplugged at runtime, therefore we need to setup a registry state to
-        // listen for seats and outputs.
         registry_state,
         seat_state,
         output_state,
         shm,
-
-        exit: false,
         first_configure: true,
-        pool,
-        width: 256,
-        height: 256,
-        shift: None,
-        layer,
+        exit: false,
         pointer: None,
+        displays: HashMap::new(),
     };
 
     event_queue.roundtrip(&mut state).unwrap();
 
-    let output = state
-        .output_state
-        .outputs()
-        .filter_map(|o| state.output_state.info(&o))
-        .next()
-        .expect("No surfaces found");
+    for output in state.output_state.outputs() {
+        let info = &state.output_state.info(&output).unwrap();
 
-    if let Some((width, height)) = output.logical_size.as_ref() {
-        state.layer.set_size(*width as u32, *height as u32);
+        let surface = compositor.create_surface(&qh);
+        let layer = layer_shell.create_layer_surface(
+            &qh,
+            surface,
+            Layer::Bottom,
+            Some(format!("wanipaper_layer_{}", info.id)),
+            Some(&output),
+        );
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.set_anchor(Anchor::all());
+
+        let (width, height) = info.logical_size.unwrap();
+        let (x, y) = info.logical_position.unwrap();
+
+        layer.set_size(width as u32, height as u32);
+        layer.commit();
+        let pool = SlotPool::new(256 * 256 * 4, &state.shm).expect("Failed to create pool");
+
+        state.displays.insert(
+            info.id,
+            display::Display {
+                id: info.id,
+                layer,
+                pool,
+                width: width as u32,
+                height: height as u32,
+                x,
+                y,
+            },
+        );
     }
 
     loop {
         event_queue.blocking_dispatch(&mut state).unwrap();
 
         if state.exit {
-            println!("exiting example");
             break;
         }
     }
