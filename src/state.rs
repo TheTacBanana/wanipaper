@@ -1,7 +1,7 @@
 use std::{collections::HashMap, num::NonZeroU32};
 
 use smithay_client_toolkit::{
-    compositor::CompositorHandler,
+    compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat, delegate_shm,
     output::{OutputHandler, OutputInfo, OutputState},
@@ -11,14 +11,11 @@ use smithay_client_toolkit::{
         pointer::{PointerEvent, PointerEventKind, PointerHandler},
         Capability, SeatHandler, SeatState,
     },
-    shell::{
-        wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
-        WaylandSurface,
-    },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
+    shm::{Shm, ShmHandler},
 };
 use wayland_client::{
-    protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, QueueHandle,
 };
 
@@ -28,6 +25,7 @@ pub struct State {
     pub registry_state: RegistryState,
     pub seat_state: SeatState,
     pub output_state: OutputState,
+    pub compositor_state: CompositorState,
     pub shm: Shm,
 
     pub exit: bool,
@@ -37,7 +35,94 @@ pub struct State {
     pub displays: HashMap<u32, Display>,
 }
 
-impl State {}
+impl State {
+    pub fn draw(&mut self, qh: &QueueHandle<Self>) {
+        for (_, disp) in &mut self.displays {
+            disp.draw(qh);
+        }
+    }
+}
+
+impl LayerShellHandler for State {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        self.displays.retain(|_, v| v.layer.0 != *layer);
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        for (_id, disp) in &mut self.displays {
+            if disp.layer.0 != *layer {
+                continue;
+            }
+
+            disp.buffer = None;
+            disp.width = NonZeroU32::new(configure.new_size.0).map_or(256, NonZeroU32::get);
+            disp.height = NonZeroU32::new(configure.new_size.1).map_or(256, NonZeroU32::get);
+            disp.damaged = true;
+
+            disp.first = false;
+        }
+
+        if self.first_configure {
+            self.first_configure = true;
+            self.draw(qh);
+        }
+    }
+}
+
+impl CompositorHandler for State {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_factor: i32,
+    ) {
+    }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {
+    }
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _time: u32,
+    ) {
+        self.draw(qh);
+    }
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {
+    }
+}
 
 impl OutputHandler for State {
     fn output_state(&mut self) -> &mut OutputState {
@@ -119,9 +204,9 @@ impl PointerHandler for State {
     ) {
         for event in events {
             println!("{:?}", event.position);
-            // // Ignore events for other surfaces
+            // Ignore events for other surfaces
             // if &event.surface != self.layer.wl_surface() {
-            //     continue;
+            // continue;
             // }
             match event.kind {
                 PointerEventKind::Enter { .. } => {
@@ -149,6 +234,7 @@ impl ProvidesRegistryState for State {
     registry_handlers![OutputState, SeatState];
 }
 
+delegate_layer!(State);
 delegate_compositor!(State);
 delegate_output!(State);
 delegate_shm!(State);

@@ -9,10 +9,12 @@ use smithay_client_toolkit::{
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell},
         WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm},
+    shm::{multi::MultiPool, slot::SlotPool, Shm},
 };
 use state::State;
 use wayland_client::{globals::registry_queue_init, Connection};
+
+use crate::display::Display;
 
 pub mod display;
 pub mod state;
@@ -27,7 +29,8 @@ fn main() {
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
 
-    let compositor = CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
+    let compositor_state =
+        CompositorState::bind(&globals, &qh).expect("wl_compositor is not available");
     let layer_shell = LayerShell::bind(&globals, &qh).expect("layer shell is not available");
     let shm = Shm::bind(&globals, &qh).expect("wl_shm is not available");
 
@@ -39,6 +42,7 @@ fn main() {
         registry_state,
         seat_state,
         output_state,
+        compositor_state,
         shm,
         first_configure: true,
         exit: false,
@@ -51,7 +55,7 @@ fn main() {
     for output in state.output_state.outputs() {
         let info = &state.output_state.info(&output).unwrap();
 
-        let surface = compositor.create_surface(&qh);
+        let surface = state.compositor_state.create_surface(&qh);
         let layer = layer_shell.create_layer_surface(
             &qh,
             surface,
@@ -67,24 +71,31 @@ fn main() {
 
         layer.set_size(width as u32, height as u32);
         layer.commit();
-        let pool = SlotPool::new(256 * 256 * 4, &state.shm).expect("Failed to create pool");
+        let pool = MultiPool::new(&state.shm).unwrap();
+        // let pool = SlotPool::new(256 * 256 * 4, &state.shm).expect("Failed to create pool");
 
         state.displays.insert(
             info.id,
-            display::Display {
+            Display {
                 id: info.id,
-                layer,
+                layer: (layer, 0),
                 pool,
+                buffer: None,
                 width: width as u32,
                 height: height as u32,
                 x,
                 y,
+                first: true,
+                damaged: true,
             },
         );
     }
 
     loop {
-        event_queue.blocking_dispatch(&mut state).unwrap();
+        match event_queue.blocking_dispatch(&mut state) {
+            Ok(_) => (),
+            Err(e) => println!("{e:?}"),
+        }
 
         if state.exit {
             break;
