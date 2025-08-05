@@ -72,7 +72,6 @@ fn main() {
         layer.set_size(width as u32, height as u32);
         layer.commit();
         let pool = MultiPool::new(&state.shm).unwrap();
-        // let pool = SlotPool::new(256 * 256 * 4, &state.shm).expect("Failed to create pool");
 
         state.displays.insert(
             info.id,
@@ -92,10 +91,7 @@ fn main() {
     }
 
     loop {
-        match event_queue.blocking_dispatch(&mut state) {
-            Ok(_) => (),
-            Err(e) => println!("{e:?}"),
-        }
+        event_queue.blocking_dispatch(&mut state).unwrap();
 
         if state.exit {
             break;

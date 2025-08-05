@@ -65,14 +65,10 @@ impl LayerShellHandler for State {
             disp.width = NonZeroU32::new(configure.new_size.0).map_or(256, NonZeroU32::get);
             disp.height = NonZeroU32::new(configure.new_size.1).map_or(256, NonZeroU32::get);
             disp.damaged = true;
-
             disp.first = false;
         }
 
-        if self.first_configure {
-            self.first_configure = true;
-            self.draw(qh);
-        }
+        self.draw(qh);
     }
 }
 
