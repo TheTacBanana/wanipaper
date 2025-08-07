@@ -9,14 +9,5 @@ pkgs.mkShell {
     atk.dev
     gtk3.dev
     libxkbcommon.dev
-
-    libGL
-    vulkan-headers
-    vulkan-loader
-    vulkan-tools
-    vulkan-tools-lunarg
-    vulkan-extension-layer
-    vulkan-validation-layers
-
   ];
 }
