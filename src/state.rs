@@ -1,5 +1,5 @@
-use std::{collections::HashMap, num::NonZeroU32};
-
+use cgmath::Vector2;
+use image::DynamicImage;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
@@ -14,14 +14,20 @@ use smithay_client_toolkit::{
     shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
     shm::{Shm, ShmHandler},
 };
+use std::collections::HashMap;
 use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, QueueHandle,
 };
 
-use crate::display::Display;
+use crate::{
+    config::{Config, RenderSource, RenderTarget, ResizeKind},
+    display::Display,
+};
 
 pub struct State {
+    pub config: Config,
+
     pub registry_state: RegistryState,
     pub seat_state: SeatState,
     pub output_state: OutputState,
@@ -32,15 +38,48 @@ pub struct State {
     pub first_configure: bool,
     pub pointer: Option<wl_pointer::WlPointer>,
 
-    pub displays: HashMap<u32, Display>,
+    pub min: Vector2<i32>,
+    pub max: Vector2<i32>,
+
+    pub displays: HashMap<String, Display>,
 }
 
 impl State {
     pub fn draw(&mut self, qh: &QueueHandle<Self>) {
-        for (_, disp) in &mut self.displays {
-            disp.draw(qh);
+        for pass in &self.config.render_passes {
+            let RenderSource::Single(image) = &pass.source;
+            let image = self.config.images.get(image).unwrap();
+
+            if let RenderTarget::Display(s) = &pass.target {
+                let display = self.displays.get_mut(s).unwrap();
+
+                display.draw(qh, &image.image, pass.resize);
+            }
+            if let RenderTarget::Group(s) = &pass.target {}
+
+            // use ResizeKind::*;
+            // match pass.resize {
+            //     None => {
+
+            //     },
+            //     Cover => {
+            //         let dyn_image = DynamicImage::ImageRgba8(image.clone);
+
+            //         dyn_image.resize(nwidth, nheight, filter)
+            //         DynamicImage::resize(&self, , nheight, filter
+            //     },
+            //     Stretch => {
+            //         DynamicImage::resize_exact(&self, nwidth, nheight, filter)
+            //     },
+            // }
         }
+
+        // for (_, disp) in &mut self.displays {
+        //     disp.draw(qh, self.min, self.max);
+        // }
     }
+
+    // pub fn group_region(&self, group: String) ->
 }
 
 impl LayerShellHandler for State {
@@ -61,9 +100,8 @@ impl LayerShellHandler for State {
                 continue;
             }
 
-            disp.buffer = None;
-            disp.width = NonZeroU32::new(configure.new_size.0).map_or(256, NonZeroU32::get);
-            disp.height = NonZeroU32::new(configure.new_size.1).map_or(256, NonZeroU32::get);
+            // disp.width = NonZeroU32::new(configure.new_size.0).map_or(256, NonZeroU32::get);
+            // disp.height = NonZeroU32::new(configure.new_size.1).map_or(256, NonZeroU32::get);
             disp.damaged = true;
             disp.first = false;
         }
@@ -200,10 +238,6 @@ impl PointerHandler for State {
     ) {
         for event in events {
             println!("{:?}", event.position);
-            // Ignore events for other surfaces
-            // if &event.surface != self.layer.wl_surface() {
-            // continue;
-            // }
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     println!("Pointer entered @{:?}", event.position);

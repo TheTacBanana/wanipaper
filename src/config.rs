@@ -2,7 +2,6 @@ use image::{ImageReader, RgbaImage};
 use serde::Deserialize;
 use std::collections::HashMap;
 use toml::{Table, Value};
-use wgpu::hal::AccelerationStructureTriangles;
 
 #[derive(Debug, Default)]
 pub struct Config {
@@ -40,7 +39,7 @@ pub enum RenderSource {
     // Many(Vec<String>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RenderTarget {
     Display(String),
     Group(String),
@@ -88,7 +87,6 @@ impl Config {
         let config_file = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
 
         let mut table: Table = toml::from_str(&config_file).unwrap();
-        println!("{:#?}", table);
 
         let mut config = Config::default();
 
@@ -167,6 +165,7 @@ impl Config {
             }
         }
 
+        // Load Render Passes
         {
             #[derive(Debug, Deserialize)]
             pub struct RenderConfig {
@@ -231,11 +230,7 @@ impl Config {
             return Err(ConfigError::UnknownKey(key));
         }
 
-        println!("{:?}", config.displays);
-        println!("{:?}", config.groups);
-        println!("{:?}", config.render_passes);
-
-        todo!()
+        return Ok(config);
     }
 }
 

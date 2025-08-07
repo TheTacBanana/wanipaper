@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-
+use crate::{config::Config, display::Display};
+use cgmath::{Vector2, Zero};
 use smithay_client_toolkit::{
     compositor::CompositorState,
     output::OutputState,
@@ -9,18 +9,27 @@ use smithay_client_toolkit::{
         wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell},
         WaylandSurface,
     },
-    shm::{multi::MultiPool, slot::SlotPool, Shm},
+    shm::{multi::MultiPool, Shm},
 };
 use state::State;
+use std::collections::HashMap;
 use wayland_client::{globals::registry_queue_init, Connection};
 
-use crate::display::Display;
-
+pub mod config;
 pub mod display;
+pub mod region;
 pub mod state;
 
 fn main() {
     env_logger::init();
+
+    let config = match Config::load("./wani.config") {
+        Ok(c) => c,
+        Err(e) => {
+            println!("{e}");
+            return;
+        }
+    };
 
     // All Wayland apps start by connecting the compositor (server).
     let conn = Connection::connect_to_env().unwrap();
@@ -39,6 +48,7 @@ fn main() {
     let output_state = OutputState::new(&globals, &qh);
 
     let mut state = State {
+        config,
         registry_state,
         seat_state,
         output_state,
@@ -48,47 +58,72 @@ fn main() {
         exit: false,
         pointer: None,
         displays: HashMap::new(),
+        min: Vector2::zero(),
+        max: Vector2::zero(),
     };
 
     event_queue.roundtrip(&mut state).unwrap();
 
-    for output in state.output_state.outputs() {
-        let info = &state.output_state.info(&output).unwrap();
+    {
+        let display_map = state
+            .config
+            .displays
+            .iter()
+            .map(|(n, d)| (&d.name, n))
+            .collect::<HashMap<_, _>>();
 
-        let surface = state.compositor_state.create_surface(&qh);
-        let layer = layer_shell.create_layer_surface(
-            &qh,
-            surface,
-            Layer::Bottom,
-            Some(format!("wanipaper_layer_{}", info.id)),
-            Some(&output),
-        );
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_anchor(Anchor::all());
+        for output in state.output_state.outputs() {
+            let info = &state.output_state.info(&output).unwrap();
 
-        let (width, height) = info.logical_size.unwrap();
-        let (x, y) = info.logical_position.unwrap();
+            // Skip if display has no name
+            // TODO: Support other identification methods
+            if info.name.is_none() {
+                continue;
+            }
 
-        layer.set_size(width as u32, height as u32);
-        layer.commit();
-        let pool = MultiPool::new(&state.shm).unwrap();
+            let Some(&name) = display_map.get(info.name.as_ref().unwrap()) else {
+                continue;
+            };
 
-        state.displays.insert(
-            info.id,
-            Display {
-                id: info.id,
-                layer: (layer, 0),
-                pool,
-                buffer: None,
-                width: width as u32,
-                height: height as u32,
-                x,
-                y,
-                first: true,
-                damaged: true,
-            },
-        );
+            let surface = state.compositor_state.create_surface(&qh);
+            let layer = layer_shell.create_layer_surface(
+                &qh,
+                surface,
+                Layer::Bottom,
+                Some(format!("wanipaper_layer_{}", info.id)),
+                Some(&output),
+            );
+            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            layer.set_anchor(Anchor::all());
+
+            let (width, height) = info.logical_size.unwrap();
+            let (x, y) = info.logical_position.unwrap();
+
+            let min = Vector2::new(x, y);
+            let max = Vector2::new(x + width, y + height);
+            let dim = Vector2::new(width, height);
+
+            layer.set_size(width as u32, height as u32);
+            layer.commit();
+            let pool = MultiPool::new(&state.shm).unwrap();
+
+            state.displays.insert(
+                name.clone(),
+                Display {
+                    layer: (layer, 0),
+                    pool,
+                    first: true,
+                    damaged: true,
+                    min,
+                    max,
+                    dim,
+                    transform: info.transform,
+                },
+            );
+        }
     }
+
+    println!("Final {:?} {:?}", state.min, state.max);
 
     loop {
         event_queue.blocking_dispatch(&mut state).unwrap();
