@@ -1,6 +1,6 @@
 use image::{ImageReader, RgbaImage};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Pointer, fs::File, path::PathBuf};
 use toml::{Table, Value};
 
 #[derive(Debug, Default)]
@@ -55,12 +55,12 @@ pub enum ResizeKind {
 }
 
 pub enum ConfigError {
+    MissingConfig(PathBuf),
+
     Io(std::io::Error),
+    Toml(toml::de::Error),
     Image(image::error::ImageError),
     UnknownKey(String),
-
-    /// Category could not be parsed
-    Parse(Option<String>, Category),
 
     /// Ident is both a display and a group
     AmbiguousRenderTarget(String),
@@ -83,11 +83,24 @@ pub enum Category {
 }
 
 impl Config {
-    pub fn load(path: &str) -> Result<Config, ConfigError> {
-        let config_file = std::fs::read_to_string(path).map_err(ConfigError::Io)?;
+    pub fn load() -> Result<Config, ConfigError> {
+        let mut config_path = std::env::home_dir().expect("Failed to get home directory");
+        config_path.push(".config/wani/");
 
-        let mut table: Table = toml::from_str(&config_file).unwrap();
+        std::fs::create_dir_all(&config_path).expect("Failed to create config directory");
+        config_path.push("wanipaper.config");
 
+        if !config_path.exists() {
+            return Err(ConfigError::MissingConfig(config_path.clone()));
+        }
+
+        // Read config file
+        let config_file = std::fs::read_to_string(config_path).map_err(ConfigError::Io)?;
+
+        // Parse into toml
+        let mut table: Table = toml::from_str(&config_file).map_err(ConfigError::Toml)?;
+
+        // Create default config
         let mut config = Config::default();
 
         // Load Images
@@ -99,9 +112,7 @@ impl Config {
 
             if let Some(Value::Table(images)) = table.remove("images") {
                 for (ident, image) in images {
-                    let image: ImageConfig = image
-                        .try_into()
-                        .map_err(|_| ConfigError::Parse(Some(ident.clone()), Category::Image))?;
+                    let image: ImageConfig = image.try_into().map_err(ConfigError::Toml)?;
 
                     let image = ImageReader::open(image.path)
                         .map_err(ConfigError::Io)?
@@ -125,9 +136,7 @@ impl Config {
 
             if let Some(Value::Table(displays)) = table.remove("displays") {
                 for (ident, display) in displays {
-                    let display: DisplayConfig = display
-                        .try_into()
-                        .map_err(|_| ConfigError::Parse(Some(ident.clone()), Category::Display))?;
+                    let display: DisplayConfig = display.try_into().map_err(ConfigError::Toml)?;
 
                     config
                         .displays
@@ -145,9 +154,7 @@ impl Config {
 
             if let Some(Value::Table(groups)) = table.remove("groups") {
                 for (ident, group) in groups {
-                    let group: GroupConfig = group
-                        .try_into()
-                        .map_err(|_| ConfigError::Parse(Some(ident.clone()), Category::Group))?;
+                    let group: GroupConfig = group.try_into().map_err(ConfigError::Toml)?;
 
                     for display in &group.displays {
                         if !config.displays.contains_key(display) {
@@ -186,9 +193,8 @@ impl Config {
 
             if let Some(Value::Array(render_passes)) = table.remove("renderpass") {
                 for render_pass in render_passes {
-                    let render_pass: RenderConfig = render_pass
-                        .try_into()
-                        .map_err(|_| ConfigError::Parse(None, Category::RenderPass))?;
+                    let render_pass: RenderConfig =
+                        render_pass.try_into().map_err(ConfigError::Toml)?;
 
                     let source = match render_pass.source {
                         OneOrMany::One(image) => {
@@ -237,21 +243,16 @@ impl Config {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigError::Io(e) => write!(f, "Io Error: {e}"),
-            ConfigError::Image(e) => write!(f, "Image Error: {e}"),
-            ConfigError::UnknownKey(k) => write!(f, "Unknown Key: {k}"),
-            ConfigError::Parse(i, c) => {
-                if let Some(i) = i {
-                    write!(f, "Failed to parse {c} {i}")
-                } else {
-                    write!(f, "Failed to parse {c}")
-                }
-            }
-            ConfigError::AmbiguousRenderTarget(s) => write!(f, "Render Target '{s}' is ambiguous"),
+            ConfigError::MissingConfig(p) => write!(f, "missing config: {p:?}"),
+            ConfigError::Toml(e) => write!(f, "{e}"),
+            ConfigError::Io(e) => write!(f, "io error: {e}"),
+            ConfigError::Image(e) => write!(f, "image error: {e}"),
+            ConfigError::UnknownKey(k) => write!(f, "unknown key: {k}"),
+            ConfigError::AmbiguousRenderTarget(s) => write!(f, "render yarget '{s}' is ambiguous"),
             ConfigError::UnknownRenderTarget(s) => write!(f, "'{s}' is neither a Display or Group"),
-            ConfigError::UnknownImage(i) => write!(f, "Image '{i}' could not be found"),
-            ConfigError::UnknownDisplay(d) => write!(f, "Display '{d}' could not be found"),
-            ConfigError::UnknownGroup(g) => write!(f, "Group '{g}' could not be found"),
+            ConfigError::UnknownImage(i) => write!(f, "image '{i}' could not be found"),
+            ConfigError::UnknownDisplay(d) => write!(f, "display '{d}' could not be found"),
+            ConfigError::UnknownGroup(g) => write!(f, "group '{g}' could not be found"),
         }
     }
 }
@@ -259,10 +260,10 @@ impl std::fmt::Display for ConfigError {
 impl std::fmt::Display for Category {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Category::Image => write!(f, "Image"),
-            Category::Display => write!(f, "Display"),
-            Category::Group => write!(f, "Group"),
-            Category::RenderPass => write!(f, "Render Pass"),
+            Category::Image => write!(f, "image"),
+            Category::Display => write!(f, "display"),
+            Category::Group => write!(f, "group"),
+            Category::RenderPass => write!(f, "render pass"),
         }
     }
 }

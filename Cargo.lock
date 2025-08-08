@@ -2109,6 +2109,7 @@ dependencies = [
  "env_logger",
  "font-kit",
  "image",
+ "log",
  "pollster",
  "raqote",
  "raw-window-handle",

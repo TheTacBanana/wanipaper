@@ -1,5 +1,6 @@
 use crate::{config::Config, display::Display, region::Region};
 use cgmath::Vector2;
+use log::{error, info};
 use smithay_client_toolkit::{
     compositor::CompositorState,
     output::OutputState,
@@ -21,15 +22,22 @@ pub mod region;
 pub mod state;
 
 fn main() {
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .format_target(false)
+        .format_timestamp(None)
+        .format_module_path(true)
+        .init();
 
-    let config = match Config::load("./wani.config") {
+    let config = match Config::load() {
         Ok(c) => c,
         Err(e) => {
-            println!("{e}");
+            error!("{e}");
             return;
         }
     };
+
+    info!("config loaded");
 
     // All Wayland apps start by connecting the compositor (server).
     let conn = Connection::connect_to_env().unwrap();
