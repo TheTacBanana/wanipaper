@@ -1,5 +1,5 @@
-use crate::{config::Config, display::Display};
-use cgmath::{Vector2, Zero};
+use crate::{config::Config, display::Display, region::Region};
+use cgmath::Vector2;
 use smithay_client_toolkit::{
     compositor::CompositorState,
     output::OutputState,
@@ -58,8 +58,7 @@ fn main() {
         exit: false,
         pointer: None,
         displays: HashMap::new(),
-        min: Vector2::zero(),
-        max: Vector2::zero(),
+        render_pass_resizes: HashMap::new(),
     };
 
     event_queue.roundtrip(&mut state).unwrap();
@@ -101,7 +100,6 @@ fn main() {
 
             let min = Vector2::new(x, y);
             let max = Vector2::new(x + width, y + height);
-            let dim = Vector2::new(width, height);
 
             layer.set_size(width as u32, height as u32);
             layer.commit();
@@ -114,16 +112,11 @@ fn main() {
                     pool,
                     first: true,
                     damaged: true,
-                    min,
-                    max,
-                    dim,
-                    transform: info.transform,
+                    region: Region::new(min, max),
                 },
             );
         }
     }
-
-    println!("Final {:?} {:?}", state.min, state.max);
 
     loop {
         event_queue.blocking_dispatch(&mut state).unwrap();

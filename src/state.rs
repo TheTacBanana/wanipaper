@@ -1,5 +1,9 @@
-use cgmath::Vector2;
-use image::DynamicImage;
+use crate::{
+    config::{Config, DisplayGroup, RenderSource, RenderTarget, ResizeKind},
+    display::Display,
+    region::{Region, TupleVecExt},
+};
+use image::{imageops::FilterType, RgbaImage};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
@@ -20,11 +24,6 @@ use wayland_client::{
     Connection, QueueHandle,
 };
 
-use crate::{
-    config::{Config, RenderSource, RenderTarget, ResizeKind},
-    display::Display,
-};
-
 pub struct State {
     pub config: Config,
 
@@ -38,48 +37,80 @@ pub struct State {
     pub first_configure: bool,
     pub pointer: Option<wl_pointer::WlPointer>,
 
-    pub min: Vector2<i32>,
-    pub max: Vector2<i32>,
-
     pub displays: HashMap<String, Display>,
+    pub render_pass_resizes: HashMap<usize, RgbaImage>,
 }
 
 impl State {
     pub fn draw(&mut self, qh: &QueueHandle<Self>) {
-        for pass in &self.config.render_passes {
+        for (index, pass) in self.config.render_passes.iter().enumerate() {
             let RenderSource::Single(image) = &pass.source;
-            let image = self.config.images.get(image).unwrap();
+            let image = &self.config.images.get(image).unwrap().image;
+
+            let total_region = match &pass.target {
+                RenderTarget::Display(d) => self.displays.get(d).unwrap().region,
+                RenderTarget::Group(g) => self
+                    .group_region(self.config.groups.get(g).unwrap())
+                    .unwrap(),
+            };
+
+            if !self.render_pass_resizes.contains_key(&index) {
+                self.render_pass_resizes.insert(
+                    index,
+                    match pass.resize {
+                        ResizeKind::None => {
+                            todo!()
+                        }
+                        ResizeKind::Cover => {
+                            let original_dims = image.dimensions().to_vec2().map(From::from);
+
+                            let scale = total_region
+                                .dim
+                                .zip(original_dims, |l, r| l as f64 / r as f64);
+                            let scale = f64::max(scale.x, scale.y);
+
+                            let new_dims = (original_dims * scale).map(|i| i.round() as u32);
+
+                            image::imageops::resize(
+                                image,
+                                new_dims.x,
+                                new_dims.y,
+                                image::imageops::FilterType::Nearest,
+                            )
+                        }
+                        ResizeKind::Stretch => image::imageops::resize(
+                            image,
+                            total_region.dim.x as u32,
+                            total_region.dim.y as u32,
+                            FilterType::Nearest,
+                        ),
+                    },
+                );
+            }
+            let scaled_image = self.render_pass_resizes.get(&index).unwrap();
 
             if let RenderTarget::Display(s) = &pass.target {
                 let display = self.displays.get_mut(s).unwrap();
 
-                display.draw(qh, &image.image, pass.resize);
+                display.draw(qh, &scaled_image, total_region);
+            } else if let RenderTarget::Group(s) = &pass.target {
+                let group = self.config.groups.get(s).unwrap();
+
+                for display in &group.displays {
+                    let display = self.displays.get_mut(display).unwrap();
+                    display.draw(qh, &scaled_image, total_region);
+                }
             }
-            if let RenderTarget::Group(s) = &pass.target {}
-
-            // use ResizeKind::*;
-            // match pass.resize {
-            //     None => {
-
-            //     },
-            //     Cover => {
-            //         let dyn_image = DynamicImage::ImageRgba8(image.clone);
-
-            //         dyn_image.resize(nwidth, nheight, filter)
-            //         DynamicImage::resize(&self, , nheight, filter
-            //     },
-            //     Stretch => {
-            //         DynamicImage::resize_exact(&self, nwidth, nheight, filter)
-            //     },
-            // }
         }
-
-        // for (_, disp) in &mut self.displays {
-        //     disp.draw(qh, self.min, self.max);
-        // }
     }
 
-    // pub fn group_region(&self, group: String) ->
+    pub fn group_region(&self, group: &DisplayGroup) -> Option<Region> {
+        group
+            .displays
+            .iter()
+            .map(|d| self.displays.get(d).unwrap().region)
+            .fold(None, |r, n| Some(r.map_or(n, |r| r.combine(n))))
+    }
 }
 
 impl LayerShellHandler for State {
@@ -92,7 +123,7 @@ impl LayerShellHandler for State {
         _conn: &Connection,
         qh: &QueueHandle<Self>,
         layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
+        _configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
         for (_id, disp) in &mut self.displays {
@@ -100,8 +131,6 @@ impl LayerShellHandler for State {
                 continue;
             }
 
-            // disp.width = NonZeroU32::new(configure.new_size.0).map_or(256, NonZeroU32::get);
-            // disp.height = NonZeroU32::new(configure.new_size.1).map_or(256, NonZeroU32::get);
             disp.damaged = true;
             disp.first = false;
         }
@@ -203,7 +232,6 @@ impl SeatHandler for State {
         capability: Capability,
     ) {
         if capability == Capability::Pointer && self.pointer.is_none() {
-            println!("Set pointer capability");
             let pointer = self
                 .seat_state
                 .get_pointer(qh, &seat)
@@ -220,7 +248,6 @@ impl SeatHandler for State {
         capability: Capability,
     ) {
         if capability == Capability::Pointer && self.pointer.is_some() {
-            println!("Unset pointer capability");
             self.pointer.take().unwrap().release();
         }
     }
@@ -237,7 +264,6 @@ impl PointerHandler for State {
         events: &[PointerEvent],
     ) {
         for event in events {
-            println!("{:?}", event.position);
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     println!("Pointer entered @{:?}", event.position);
@@ -268,39 +294,6 @@ delegate_layer!(State);
 delegate_compositor!(State);
 delegate_output!(State);
 delegate_shm!(State);
-
 delegate_seat!(State);
 delegate_pointer!(State);
-
 delegate_registry!(State);
-
-pub fn print_output(info: &OutputInfo) {
-    println!("{}", info.model);
-
-    if let Some(name) = info.name.as_ref() {
-        println!("\tname: {name}");
-    }
-
-    if let Some(description) = info.description.as_ref() {
-        println!("\tdescription: {description}");
-    }
-
-    println!("\tmake: {}", info.make);
-    println!("\tx: {}, y: {}", info.location.0, info.location.1);
-    println!("\tsubpixel: {:?}", info.subpixel);
-    println!(
-        "\tphysical_size: {}×{}mm",
-        info.physical_size.0, info.physical_size.1
-    );
-    if let Some((x, y)) = info.logical_position.as_ref() {
-        println!("\tlogical x: {x}, y: {y}");
-    }
-    if let Some((width, height)) = info.logical_size.as_ref() {
-        println!("\tlogical width: {width}, height: {height}");
-    }
-    println!("\tmodes:");
-
-    for mode in &info.modes {
-        println!("\t\t{mode}");
-    }
-}
