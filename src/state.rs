@@ -71,12 +71,21 @@ impl State {
 
                             let new_dims = (original_dims * scale).map(|i| i.round() as u32);
 
-                            image::imageops::resize(
+                            let temp_image = image::imageops::resize(
                                 image,
                                 new_dims.x,
                                 new_dims.y,
-                                image::imageops::FilterType::Nearest,
+                                FilterType::Nearest,
+                            );
+
+                            image::imageops::crop_imm(
+                                &temp_image,
+                                ((new_dims.x as i32 - total_region.dim.x) / 2).max(0) as u32,
+                                ((new_dims.y as i32 - total_region.dim.y) / 2).max(0) as u32,
+                                total_region.dim.x as u32,
+                                total_region.dim.y as u32,
                             )
+                            .to_image()
                         }
                         ResizeKind::Stretch => image::imageops::resize(
                             image,
