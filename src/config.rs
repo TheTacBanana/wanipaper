@@ -2,7 +2,10 @@ use image::{ImageReader, RgbaImage};
 use log::{error, info};
 use rand::random_range;
 use serde::Deserialize;
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 use toml::{Table, Value};
 
 #[derive(Debug, Default)]
@@ -81,13 +84,6 @@ pub enum ConfigError {
     UnknownGroup(String),
 }
 
-pub enum Category {
-    Image,
-    Display,
-    Group,
-    RenderPass,
-}
-
 impl Config {
     pub fn load() -> Result<Config, ConfigError> {
         // Create path to config directory
@@ -114,11 +110,6 @@ impl Config {
 
         // Create default config
         let mut config = Config::default();
-
-        // Track targets
-        // let mut image_count = HashMap::new();
-        // let mut display_count = HashMap::new();
-        // let mut _count = HashMap::new();
 
         // Load Images
         {
@@ -322,6 +313,35 @@ impl Config {
             return Err(ConfigError::UnknownKey(key));
         }
 
+        // Remove unused images
+        {
+            let mut image_uses = HashSet::new();
+            for pass in config.render_passes.iter() {
+                match &pass.source {
+                    RenderSource::Single(image) => {
+                        image_uses.insert(image);
+                    }
+                    RenderSource::Many { images, .. } => {
+                        for image in images {
+                            image_uses.insert(image);
+                        }
+                    }
+                }
+            }
+            config.images = config
+                .images
+                .into_iter()
+                .filter(|(ident, _)| {
+                    if image_uses.contains(ident) {
+                        true
+                    } else {
+                        info!("image '{ident}' unused, removed");
+                        false
+                    }
+                })
+                .collect();
+        }
+
         return Ok(config);
     }
 }
@@ -339,17 +359,6 @@ impl std::fmt::Display for ConfigError {
             ConfigError::UnknownImage(i) => write!(f, "image '{i}' could not be found"),
             ConfigError::UnknownDisplay(d) => write!(f, "display '{d}' could not be found"),
             ConfigError::UnknownGroup(g) => write!(f, "group '{g}' could not be found"),
-        }
-    }
-}
-
-impl std::fmt::Display for Category {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Category::Image => write!(f, "image"),
-            Category::Display => write!(f, "display"),
-            Category::Group => write!(f, "group"),
-            Category::RenderPass => write!(f, "render pass"),
         }
     }
 }
