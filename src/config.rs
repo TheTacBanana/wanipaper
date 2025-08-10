@@ -1,6 +1,8 @@
 use image::{ImageReader, RgbaImage};
+use log::{error, info};
+use rand::random_range;
 use serde::Deserialize;
-use std::{collections::HashMap, fmt::Pointer, fs::File, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf};
 use toml::{Table, Value};
 
 #[derive(Debug, Default)]
@@ -36,7 +38,11 @@ pub struct RenderPass {
 #[derive(Debug)]
 pub enum RenderSource {
     Single(String),
-    // Many(Vec<String>),
+    Many {
+        images: Vec<String>,
+        rand: bool,
+        rotate: Option<usize>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -84,15 +90,21 @@ pub enum Category {
 
 impl Config {
     pub fn load() -> Result<Config, ConfigError> {
-        let mut config_path = std::env::home_dir().expect("Failed to get home directory");
-        config_path.push(".config/wani/");
+        // Create path to config directory
+        let mut wani_path = std::env::home_dir().expect("Failed to get home directory");
+        wani_path.push(".config/wani");
+        std::fs::create_dir_all(&wani_path).expect("Failed to create config directory");
+        info!("wanipaper directory {:?}", wani_path);
 
-        std::fs::create_dir_all(&config_path).expect("Failed to create config directory");
+        let mut config_path = wani_path.clone();
         config_path.push("wanipaper.config");
+        info!("wanipaper config path {:?}", config_path);
 
         if !config_path.exists() {
             return Err(ConfigError::MissingConfig(config_path.clone()));
         }
+
+        info!("load path {:?}", config_path);
 
         // Read config file
         let config_file = std::fs::read_to_string(config_path).map_err(ConfigError::Io)?;
@@ -103,6 +115,11 @@ impl Config {
         // Create default config
         let mut config = Config::default();
 
+        // Track targets
+        // let mut image_count = HashMap::new();
+        // let mut display_count = HashMap::new();
+        // let mut _count = HashMap::new();
+
         // Load Images
         {
             #[derive(Deserialize)]
@@ -112,17 +129,31 @@ impl Config {
 
             if let Some(Value::Table(images)) = table.remove("images") {
                 for (ident, image) in images {
-                    let image: ImageConfig = image.try_into().map_err(ConfigError::Toml)?;
+                    let image_config: ImageConfig = image.try_into().map_err(ConfigError::Toml)?;
 
-                    let image = ImageReader::open(image.path)
-                        .map_err(ConfigError::Io)?
-                        .with_guessed_format()
-                        .map_err(ConfigError::Io)?
-                        .decode()
-                        .map_err(ConfigError::Image)?
-                        .into_rgba8();
+                    let mut image_path = wani_path.clone();
+                    image_path.push(image_config.path);
+                    info!("load image {:?}", image_path);
 
-                    config.images.insert(ident, LoadedImage { image });
+                    let loaded_image = || -> Result<RgbaImage, ConfigError> {
+                        Ok(ImageReader::open(&image_path)
+                            .map_err(ConfigError::Io)?
+                            .with_guessed_format()
+                            .map_err(ConfigError::Io)?
+                            .decode()
+                            .map_err(ConfigError::Image)?
+                            .into_rgba8())
+                    }();
+
+                    match loaded_image {
+                        Ok(image) => {
+                            config.images.insert(ident, LoadedImage { image });
+                        }
+                        Err(e) => {
+                            error!("failed to load image: {:?}", &image_path);
+                            error!("{e}");
+                        }
+                    }
                 }
             };
         }
@@ -154,12 +185,25 @@ impl Config {
 
             if let Some(Value::Table(groups)) = table.remove("groups") {
                 for (ident, group) in groups {
-                    let group: GroupConfig = group.try_into().map_err(ConfigError::Toml)?;
+                    let mut group: GroupConfig = group.try_into().map_err(ConfigError::Toml)?;
 
-                    for display in &group.displays {
-                        if !config.displays.contains_key(display) {
-                            return Err(ConfigError::UnknownDisplay(display.clone()));
-                        }
+                    group.displays = group
+                        .displays
+                        .into_iter()
+                        .filter(|display| {
+                            if !config.displays.contains_key(display) {
+                                error!(
+                                    "display '{display}' not found, removed from group '{ident}'"
+                                );
+                                return false;
+                            }
+                            true
+                        })
+                        .collect();
+
+                    if group.displays.is_empty() {
+                        error!("group '{ident}' contains no displays, group removed");
+                        continue;
                     }
 
                     config.groups.insert(
@@ -176,19 +220,29 @@ impl Config {
         {
             #[derive(Debug, Deserialize)]
             pub struct RenderConfig {
-                pub source: OneOrMany<String>,
-                pub target: String,
+                source: OneOrMany<String>,
                 #[serde(default)]
-                pub resize: ResizeKind,
+                selection: Option<SelectionConfig>,
+                target: String,
+                #[serde(default)]
+                resize: ResizeKind,
             }
 
             #[derive(Clone, Debug, Deserialize, PartialEq)]
             #[serde(untagged)]
-            pub enum OneOrMany<T> {
+            enum OneOrMany<T> {
                 /// Single value
                 One(T),
                 /// Array of values
                 Vec(Vec<T>),
+            }
+
+            #[derive(Debug, Deserialize)]
+            struct SelectionConfig {
+                #[serde(default)]
+                rand: bool,
+                #[serde(default)]
+                rotate: Option<usize>,
             }
 
             if let Some(Value::Array(render_passes)) = table.remove("renderpass") {
@@ -199,12 +253,44 @@ impl Config {
                     let source = match render_pass.source {
                         OneOrMany::One(image) => {
                             if !config.images.contains_key(&image) {
-                                return Err(ConfigError::UnknownImage(image));
+                                error!("image '{image}' not found, removing renderpass");
+                                continue;
                             }
                             RenderSource::Single(image)
                         }
-                        OneOrMany::Vec(_) => {
-                            todo!()
+                        OneOrMany::Vec(mut images) => {
+                            images = images
+                                .into_iter()
+                                .filter(|image| {
+                                    if !config.images.contains_key(image) {
+                                        error!("image '{image}' not found, removing renderpass");
+                                        return false;
+                                    }
+                                    true
+                                })
+                                .collect();
+
+                            if images.is_empty() {
+                                error!("renderpass contains no sources, removed");
+                                continue;
+                            }
+
+                            match render_pass.selection {
+                                None => RenderSource::Single(images[0].clone()),
+                                Some(SelectionConfig { rand, rotate }) => {
+                                    if rotate.is_none() && rand {
+                                        let image = images[random_range(0..images.len())].clone();
+                                        info!("selected random image '{image}'");
+                                        RenderSource::Single(image)
+                                    } else {
+                                        RenderSource::Many {
+                                            images,
+                                            rand,
+                                            rotate,
+                                        }
+                                    }
+                                }
+                            }
                         }
                     };
 

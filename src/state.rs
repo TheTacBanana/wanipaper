@@ -8,17 +8,23 @@ use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat, delegate_shm,
-    output::{OutputHandler, OutputInfo, OutputState},
+    output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{PointerEvent, PointerHandler},
         Capability, SeatHandler, SeatState,
     },
     shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
     shm::{Shm, ShmHandler},
 };
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, QueueHandle,
@@ -39,12 +45,20 @@ pub struct State {
 
     pub displays: HashMap<String, Display>,
     pub render_pass_resizes: HashMap<usize, RgbaImage>,
+    pub render_pass_rotate_index: HashMap<usize, Arc<AtomicUsize>>,
 }
 
 impl State {
     pub fn draw(&mut self, qh: &QueueHandle<Self>) {
         for (index, pass) in self.config.render_passes.iter().enumerate() {
-            let RenderSource::Single(image) = &pass.source;
+            let image = match &pass.source {
+                RenderSource::Single(image) => image,
+                RenderSource::Many { images, .. } => &{
+                    let rotate_index = self.render_pass_rotate_index.get(&index).unwrap();
+                    &images[rotate_index.load(Ordering::Acquire) % images.len()]
+                },
+            };
+
             let image = &self.config.images.get(image).unwrap().image;
 
             let total_region = match &pass.target {
@@ -54,48 +68,50 @@ impl State {
                     .unwrap(),
             };
 
-            if !self.render_pass_resizes.contains_key(&index) {
-                self.render_pass_resizes.insert(
-                    index,
-                    match pass.resize {
-                        ResizeKind::None => {
-                            todo!()
-                        }
-                        ResizeKind::Cover => {
-                            let original_dims = image.dimensions().to_vec2().map(From::from);
+            // TODO: cache resize results
+            // if true {
+            // !self.render_pass_resizes.contains_key(&index) {
+            self.render_pass_resizes.insert(
+                index,
+                match pass.resize {
+                    ResizeKind::None => {
+                        todo!()
+                    }
+                    ResizeKind::Cover => {
+                        let original_dims = image.dimensions().to_vec2().map(From::from);
 
-                            let scale = total_region
-                                .dim
-                                .zip(original_dims, |l, r| l as f64 / r as f64);
-                            let scale = f64::max(scale.x, scale.y);
+                        let scale = total_region
+                            .dim
+                            .zip(original_dims, |l, r| l as f64 / r as f64);
+                        let scale = f64::max(scale.x, scale.y);
 
-                            let new_dims = (original_dims * scale).map(|i| i.round() as u32);
+                        let new_dims = (original_dims * scale).map(|i| i.round() as u32);
 
-                            let temp_image = image::imageops::resize(
-                                image,
-                                new_dims.x,
-                                new_dims.y,
-                                FilterType::Nearest,
-                            );
-
-                            image::imageops::crop_imm(
-                                &temp_image,
-                                ((new_dims.x as i32 - total_region.dim.x) / 2).max(0) as u32,
-                                ((new_dims.y as i32 - total_region.dim.y) / 2).max(0) as u32,
-                                total_region.dim.x as u32,
-                                total_region.dim.y as u32,
-                            )
-                            .to_image()
-                        }
-                        ResizeKind::Stretch => image::imageops::resize(
+                        let temp_image = image::imageops::resize(
                             image,
+                            new_dims.x,
+                            new_dims.y,
+                            FilterType::Nearest,
+                        );
+
+                        image::imageops::crop_imm(
+                            &temp_image,
+                            ((new_dims.x as i32 - total_region.dim.x) / 2).max(0) as u32,
+                            ((new_dims.y as i32 - total_region.dim.y) / 2).max(0) as u32,
                             total_region.dim.x as u32,
                             total_region.dim.y as u32,
-                            FilterType::Nearest,
-                        ),
-                    },
-                );
-            }
+                        )
+                        .to_image()
+                    }
+                    ResizeKind::Stretch => image::imageops::resize(
+                        image,
+                        total_region.dim.x as u32,
+                        total_region.dim.y as u32,
+                        FilterType::Nearest,
+                    ),
+                },
+            );
+            // }
             let scaled_image = self.render_pass_resizes.get(&index).unwrap();
 
             if let RenderTarget::Display(s) = &pass.target {
@@ -140,7 +156,7 @@ impl LayerShellHandler for State {
                 continue;
             }
 
-            disp.damaged = true;
+            disp.damaged.store(true, Ordering::Release);
             disp.first = false;
         }
 
@@ -270,19 +286,8 @@ impl PointerHandler for State {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _pointer: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
+        _events: &[PointerEvent],
     ) {
-        for event in events {
-            match event.kind {
-                PointerEventKind::Enter { .. } => {
-                    println!("Pointer entered @{:?}", event.position);
-                }
-                PointerEventKind::Leave { .. } => {
-                    println!("Pointer left");
-                }
-                _ => (),
-            }
-        }
     }
 }
 

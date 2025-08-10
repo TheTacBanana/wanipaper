@@ -4,19 +4,23 @@ use smithay_client_toolkit::{
     shell::{wlr_layer::LayerSurface, WaylandSurface},
     shm::multi::MultiPool,
 };
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use wayland_client::{protocol::wl_shm, QueueHandle};
 
 pub struct Display {
     pub layer: (LayerSurface, usize),
     pub pool: MultiPool<(LayerSurface, usize)>,
     pub first: bool,
-    pub damaged: bool,
+    pub damaged: Arc<AtomicBool>,
     pub region: Region,
 }
 
 impl Display {
     pub fn draw(&mut self, qh: &QueueHandle<State>, image: &RgbaImage, total: Region) {
-        if self.first || !self.damaged {
+        if self.first || !self.damaged.load(Ordering::Acquire) {
             return;
         }
 
@@ -70,7 +74,7 @@ impl Display {
             layer.attach(Some(buffer), 0, 0);
             layer.commit();
 
-            self.damaged = false;
+            self.damaged.store(false, Ordering::Release);
 
             return;
         }
