@@ -25,7 +25,6 @@ impl Display {
         }
 
         let layer = &self.layer.0;
-
         for i in 0..2 {
             self.layer.1 = i;
             let Ok((_offset, buffer, canvas)) = self.pool.create_buffer(

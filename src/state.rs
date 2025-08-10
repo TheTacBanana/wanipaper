@@ -74,9 +74,6 @@ impl State {
             self.render_pass_resizes.insert(
                 index,
                 match pass.resize {
-                    ResizeKind::None => {
-                        todo!()
-                    }
                     ResizeKind::Cover => {
                         let original_dims = image.dimensions().to_vec2().map(From::from);
 

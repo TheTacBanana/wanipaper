@@ -1,5 +1,5 @@
 use image::{ImageReader, RgbaImage};
-use log::{error, info};
+use log::{error, info, warn};
 use rand::random_range;
 use serde::Deserialize;
 use std::{
@@ -58,7 +58,6 @@ pub enum RenderTarget {
 #[serde(rename_all = "snake_case")]
 pub enum ResizeKind {
     #[default]
-    None,
     Cover,
     Stretch,
 }
@@ -69,7 +68,6 @@ pub enum ConfigError {
     Io(std::io::Error),
     Toml(toml::de::Error),
     Image(image::error::ImageError),
-    UnknownKey(String),
 
     /// Ident is both a display and a group
     AmbiguousRenderTarget(String),
@@ -82,6 +80,9 @@ pub enum ConfigError {
     UnknownDisplay(String),
     /// Group could not be found
     UnknownGroup(String),
+
+    /// No Render Passes
+    NoRenderPasses,
 }
 
 impl Config {
@@ -183,7 +184,7 @@ impl Config {
                         .into_iter()
                         .filter(|display| {
                             if !config.displays.contains_key(display) {
-                                error!(
+                                warn!(
                                     "display '{display}' not found, removed from group '{ident}'"
                                 );
                                 return false;
@@ -254,7 +255,7 @@ impl Config {
                                 .into_iter()
                                 .filter(|image| {
                                     if !config.images.contains_key(image) {
-                                        error!("image '{image}' not found, removing renderpass");
+                                        warn!("image '{image}' not found, removing renderpass");
                                         return false;
                                     }
                                     true
@@ -309,8 +310,14 @@ impl Config {
             }
         }
 
-        if let Some((key, _)) = table.into_iter().next() {
-            return Err(ConfigError::UnknownKey(key));
+        // Report unknown keys
+        for (key, _) in table.into_iter() {
+            error!("unknown key: '{key}'");
+        }
+
+        // Error if no render passes
+        if config.render_passes.is_empty() {
+            return Err(ConfigError::NoRenderPasses);
         }
 
         // Remove unused images
@@ -353,12 +360,12 @@ impl std::fmt::Display for ConfigError {
             ConfigError::Toml(e) => write!(f, "{e}"),
             ConfigError::Io(e) => write!(f, "io error: {e}"),
             ConfigError::Image(e) => write!(f, "image error: {e}"),
-            ConfigError::UnknownKey(k) => write!(f, "unknown key: {k}"),
             ConfigError::AmbiguousRenderTarget(s) => write!(f, "render yarget '{s}' is ambiguous"),
             ConfigError::UnknownRenderTarget(s) => write!(f, "'{s}' is neither a Display or Group"),
             ConfigError::UnknownImage(i) => write!(f, "image '{i}' could not be found"),
             ConfigError::UnknownDisplay(d) => write!(f, "display '{d}' could not be found"),
             ConfigError::UnknownGroup(g) => write!(f, "group '{g}' could not be found"),
+            ConfigError::NoRenderPasses => write!(f, "no render passes could be found"),
         }
     }
 }
