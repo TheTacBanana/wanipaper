@@ -3,7 +3,9 @@ use crate::{
     display::Display,
     region::{Region, TupleVecExt},
 };
+use cgmath::Vector2;
 use image::{imageops::FilterType, RgbaImage};
+use log::{info, warn};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_pointer, delegate_registry,
@@ -15,18 +17,27 @@ use smithay_client_toolkit::{
         pointer::{PointerEvent, PointerHandler},
         Capability, SeatHandler, SeatState,
     },
-    shell::wlr_layer::{LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
-    shm::{Shm, ShmHandler},
+    shell::{
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+            LayerSurfaceConfigure,
+        },
+        WaylandSurface,
+    },
+    shm::{multi::MultiPool, Shm, ShmHandler},
 };
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
 };
 use wayland_client::{
-    protocol::{wl_output, wl_pointer, wl_seat, wl_surface},
+    protocol::{
+        wl_output::{self, WlOutput},
+        wl_pointer, wl_seat, wl_surface,
+    },
     Connection, QueueHandle,
 };
 
@@ -38,10 +49,13 @@ pub struct State {
     pub output_state: OutputState,
     pub compositor_state: CompositorState,
     pub shm: Shm,
+    pub layer_shell: LayerShell,
 
     pub exit: bool,
     pub first_configure: bool,
     pub pointer: Option<wl_pointer::WlPointer>,
+
+    pub display_ident_map: HashMap<String, String>,
 
     pub displays: HashMap<String, Display>,
     pub render_pass_resizes: HashMap<usize, RgbaImage>,
@@ -68,9 +82,6 @@ impl State {
                     .unwrap(),
             };
 
-            // TODO: cache resize results
-            // if true {
-            // !self.render_pass_resizes.contains_key(&index) {
             self.render_pass_resizes.insert(
                 index,
                 match pass.resize {
@@ -108,7 +119,6 @@ impl State {
                     ),
                 },
             );
-            // }
             let scaled_image = self.render_pass_resizes.get(&index).unwrap();
 
             if let RenderTarget::Display(s) = &pass.target {
@@ -119,7 +129,9 @@ impl State {
                 let group = self.config.groups.get(s).unwrap();
 
                 for display in &group.displays {
-                    let display = self.displays.get_mut(display).unwrap();
+                    let Some(display) = self.displays.get_mut(display) else {
+                        continue;
+                    };
                     display.draw(qh, &scaled_image, total_region);
                 }
             }
@@ -130,8 +142,82 @@ impl State {
         group
             .displays
             .iter()
-            .map(|d| self.displays.get(d).unwrap().region)
+            .filter_map(|d| self.displays.get(d).map(|d| d.region))
+            // .map(f)
             .fold(None, |r, n| Some(r.map_or(n, |r| r.combine(n))))
+    }
+
+    pub fn add_display(&mut self, output: &WlOutput, qh: &QueueHandle<Self>) -> bool {
+        let info = &self.output_state.info(&output).unwrap();
+
+        // Skip if display has no name
+        // TODO: Support other identification methods
+        if info.name.is_none() {
+            return false;
+        }
+
+        let name = info.name.as_ref().unwrap();
+        let Some(name) = self.display_ident_map.get(name) else {
+            warn!("skipping display: {name}");
+            return false;
+        };
+
+        let surface = self.compositor_state.create_surface(qh);
+
+        let layer = self.layer_shell.create_layer_surface(
+            &qh,
+            surface,
+            Layer::Bottom,
+            Some(format!("wanipaper_layer_{}", info.id)),
+            Some(&output),
+        );
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        layer.set_anchor(Anchor::all());
+
+        let (width, height) = info.logical_size.unwrap();
+        let (x, y) = info.logical_position.unwrap();
+
+        let min = Vector2::new(x, y);
+        let max = Vector2::new(x + width, y + height);
+
+        layer.set_size(width as u32, height as u32);
+        layer.commit();
+        let pool = MultiPool::new(&self.shm).unwrap();
+
+        self.displays.insert(
+            name.clone(),
+            Display {
+                layer: (layer, 0),
+                pool,
+                first: true,
+                damaged: Arc::new(AtomicBool::new(true)),
+                region: Region::new(min, max),
+            },
+        );
+
+        info!("display added: '{}'", name);
+
+        return true;
+    }
+
+    pub fn remove_display(&mut self, output: &WlOutput) -> bool {
+        let info = &self.output_state.info(&output).unwrap();
+
+        // Skip if display has no name
+        // TODO: Support other identification methods
+        if info.name.is_none() {
+            return false;
+        }
+
+        let Some(name) = self.display_ident_map.get(info.name.as_ref().unwrap()) else {
+            return false;
+        };
+
+        self.displays.remove(name);
+
+        info!("display removed: '{}'", name);
+
+        return true;
     }
 }
 
@@ -217,25 +303,29 @@ impl OutputHandler for State {
     fn new_output(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
     ) {
+        self.add_display(&output, qh);
     }
 
     fn update_output(
         &mut self,
         _conn: &Connection,
-        _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        qh: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
     ) {
+        self.remove_display(&output);
+        self.add_display(&output, qh);
     }
 
     fn output_destroyed(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _output: wl_output::WlOutput,
+        output: wl_output::WlOutput,
     ) {
+        self.remove_display(&output);
     }
 }
 

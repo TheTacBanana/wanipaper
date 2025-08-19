@@ -73,6 +73,12 @@ fn main() {
     let seat_state = SeatState::new(&globals, &qh);
     let output_state = OutputState::new(&globals, &qh);
 
+    let display_ident_map = config
+        .displays
+        .iter()
+        .map(|(n, d)| (d.name.clone(), n.clone()))
+        .collect::<HashMap<_, _>>();
+
     let mut state = State {
         config,
         registry_state,
@@ -86,64 +92,9 @@ fn main() {
         displays: HashMap::new(),
         render_pass_resizes: HashMap::new(),
         render_pass_rotate_index: HashMap::new(),
+        layer_shell,
+        display_ident_map,
     };
-
-    event_queue.roundtrip(&mut state).unwrap();
-
-    {
-        let display_map = state
-            .config
-            .displays
-            .iter()
-            .map(|(n, d)| (&d.name, n))
-            .collect::<HashMap<_, _>>();
-
-        for output in state.output_state.outputs() {
-            let info = &state.output_state.info(&output).unwrap();
-
-            // Skip if display has no name
-            // TODO: Support other identification methods
-            if info.name.is_none() {
-                continue;
-            }
-
-            let Some(&name) = display_map.get(info.name.as_ref().unwrap()) else {
-                continue;
-            };
-
-            let surface = state.compositor_state.create_surface(&qh);
-            let layer = layer_shell.create_layer_surface(
-                &qh,
-                surface,
-                Layer::Bottom,
-                Some(format!("wanipaper_layer_{}", info.id)),
-                Some(&output),
-            );
-            layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-            layer.set_anchor(Anchor::all());
-
-            let (width, height) = info.logical_size.unwrap();
-            let (x, y) = info.logical_position.unwrap();
-
-            let min = Vector2::new(x, y);
-            let max = Vector2::new(x + width, y + height);
-
-            layer.set_size(width as u32, height as u32);
-            layer.commit();
-            let pool = MultiPool::new(&state.shm).unwrap();
-
-            state.displays.insert(
-                name.clone(),
-                Display {
-                    layer: (layer, 0),
-                    pool,
-                    first: true,
-                    damaged: Arc::new(AtomicBool::new(true)),
-                    region: Region::new(min, max),
-                },
-            );
-        }
-    }
 
     let mut threads = Vec::new();
     for (index, pass) in state.config.render_passes.iter().enumerate() {
