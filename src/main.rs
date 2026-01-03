@@ -1,29 +1,17 @@
-use crate::{
-    config::{Config, RenderSource, RenderTarget},
-    display::Display,
-    region::Region,
-};
-use cgmath::Vector2;
-use log::{error, info};
+use crate::config::{Config, RenderSource, RenderTarget};
+use log::{error, info, LevelFilter};
 use mq::EventKind;
 use nix::{errno::Errno, sys::epoll::*};
 use rand::random_range;
 use smithay_client_toolkit::{
-    compositor::CompositorState,
-    output::OutputState,
-    registry::RegistryState,
-    seat::SeatState,
-    shell::{
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell},
-        WaylandSurface,
-    },
-    shm::{multi::MultiPool, Shm},
+    compositor::CompositorState, output::OutputState, registry::RegistryState, seat::SeatState,
+    shell::wlr_layer::LayerShell, shm::Shm,
 };
 use state::State;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -38,7 +26,7 @@ pub mod state;
 
 fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
+        .filter_level(LevelFilter::Info)
         .format_target(false)
         .format_timestamp(None)
         .format_module_path(true)
